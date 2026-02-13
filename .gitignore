@@ -201,6 +201,12 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Data / generated files
+*.txt
+*.json
+*.xml
+*.tar.gz
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
