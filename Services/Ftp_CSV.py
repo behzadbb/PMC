@@ -66,11 +66,15 @@ class Ftp_CSV:
         return links
 
     def _download_file(self, file_url: str, save_dir: Path) -> Path:
-        """Download a single file from URL into save_dir; return path to saved file."""
+        """Download a single file from URL into save_dir; return path to saved file. Skips if file already exists."""
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         filename = file_url.rstrip("/").split("/")[-1]
         save_path = save_dir / filename
+
+        if save_path.exists():
+            print(f"File {save_path} already exists, skipping download")
+            return save_path
 
         try:
             resp = self.session.get(file_url, timeout=120, stream=True)
@@ -189,4 +193,9 @@ class Ftp_CSV:
         for file_path in self.get_csv_file_list(directory_path):
             ids = self.get_id_list_from_csv_file(file_path)
             pmc_ids.extend(ids)
+            
+        save_path = Path(directory_path) / "pmc_ids_csv.txt"
+        with open(save_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(str(pid) for pid in pmc_ids))
+        print(f"Saved PMC IDs to {save_path}")
         return pmc_ids
