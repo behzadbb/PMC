@@ -206,6 +206,7 @@ cython_debug/
 *.json
 *.xml
 *.tar.gz
+*.csv
 
 # Marimo
 marimo/_static/
