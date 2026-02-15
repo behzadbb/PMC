@@ -7,6 +7,7 @@ import json
 import os
 import re
 import warnings
+from datetime import datetime
 from typing import Dict, List, Optional, Union
 from urllib.parse import urlparse
 
@@ -414,7 +415,26 @@ class PMCScraper:
         except Exception as e:
             return {'error': str(e), 'url': url}
     
-    def _create_article_instance(self, article_data: Dict) -> Article:
+    @staticmethod
+    def _parse_publication_date_str(s: str) -> Optional[datetime]:
+        """Parse publication date string (e.g. '2013 Nov 5') to datetime for Article DTO."""
+        if not s or not s.strip():
+            return None
+        s = s.strip()
+        for fmt in ('%Y %b %d', '%Y %B %d', '%Y-%m-%d', '%Y %m %d', '%Y'):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        year_match = re.search(r'\b(19|20)\d{2}\b', s)
+        if year_match:
+            try:
+                return datetime(int(year_match.group(0)), 1, 1)
+            except (ValueError, TypeError):
+                pass
+        return None
+    
+    def _create_article_instance(self, article_data: Dict) -> Union[Article, Dict]:
         """
         Convert dictionary to Article instance.
         
@@ -422,20 +442,31 @@ class PMCScraper:
             article_data: Dictionary containing article data
         
         Returns:
-            Article instance
+            Article instance or dict with _article_creation_error on validation failure
         """
+        data = dict(article_data)
         try:
+            # Normalize pmcid: Article expects int (e.g. 4049904), scraper may pass "PMC4049904"
+            if data.get('pmcid') is not None:
+                raw = data['pmcid']
+                if isinstance(raw, str):
+                    num = raw.replace('PMC', '').strip()
+                    if num.isdigit():
+                        data['pmcid'] = int(num)
+                elif not isinstance(raw, int):
+                    data['pmcid'] = None
+            # Normalize publication_date: Article expects datetime or None, scraper may pass "2013 Nov 5"
+            if data.get('publication_date') is not None and isinstance(data['publication_date'], str):
+                data['publication_date'] = self._parse_publication_date_str(data['publication_date'])
             # Convert references list of dicts to list of strings if needed
-            if 'references' in article_data and article_data['references']:
-                if isinstance(article_data['references'], list) and len(article_data['references']) > 0:
-                    if isinstance(article_data['references'][0], dict):
-                        article_data['references'] = [ref.get('text', str(ref)) for ref in article_data['references']]
-            
-            return Article(**article_data)
+            if data.get('references'):
+                refs = data['references']
+                if isinstance(refs, list) and refs and isinstance(refs[0], dict):
+                    data['references'] = [ref.get('text', str(ref)) for ref in refs]
+            return Article(**data)
         except Exception as e:
-            # If Article creation fails, return the dict with error
-            article_data['_article_creation_error'] = str(e)
-            return article_data
+            data['_article_creation_error'] = str(e)
+            return data
     
     def _extract_from_html(self, soup: BeautifulSoup, url: str, pmcid: str) -> Dict:
         """Extract data from HTML page."""
@@ -456,6 +487,7 @@ class PMCScraper:
             'keywords': self._extract_keywords(soup),
             'full_text_sections': self._extract_full_text_sections(soup),
             'journal': self._extract_journal(soup),
+            'issn': self._extract_issn(soup),
             'citation': self._extract_citation(soup),
             'received_date': self._extract_received_date(soup),
             'accepted_date': self._extract_accepted_date(soup),
@@ -561,6 +593,11 @@ class PMCScraper:
             issue = article.find('issue')
             if issue:
                 article_data['issue'] = issue.get_text().strip()
+            
+            # ISSN (prefer epub then any)
+            issn_elem = article.find('issn', {'pub-type': 'epub'}) or article.find('issn')
+            if issn_elem and issn_elem.get_text():
+                article_data['issn'] = issn_elem.get_text().strip()
             
             # Publication date and Year
             pub_date = article.find('pub-date')
@@ -997,6 +1034,27 @@ class PMCScraper:
         return self._extract_meta_tag(
             soup,
             meta_names=['citation_journal_title'],
+            fallback_func=fallback
+        )
+    
+    def _extract_issn(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract ISSN from meta tags or page content."""
+        def fallback(soup):
+            # Try span/div that might contain ISSN (e.g. citation block)
+            issn_elem = soup.find('span', class_='issn') or soup.find('div', class_='issn')
+            if issn_elem and issn_elem.get_text():
+                return issn_elem.get_text().strip()
+            # Pattern: ISSN 1234-5678 or ISSN: 1234-5678
+            issn_pattern = re.compile(r'ISSN[:\s]*([0-9]{4}-[0-9]{3}[0-9Xx])', re.I)
+            text = soup.get_text()
+            match = issn_pattern.search(text)
+            if match:
+                return match.group(1)
+            return None
+        
+        return self._extract_meta_tag(
+            soup,
+            meta_names=['citation_issn', 'citation_issn_print', 'citation_issn_electronic'],
             fallback_func=fallback
         )
     

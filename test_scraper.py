@@ -7,23 +7,40 @@ import json
 import sys
 from pmc_scraper import PMCScraper
 
+def _to_serializable(obj):
+    """Convert Article or dict to a JSON-serializable dict (safe for file and console)."""
+    if hasattr(obj, 'model_dump'):
+        return obj.model_dump(mode='json')
+    if hasattr(obj, 'dict'):
+        try:
+            return obj.dict(exclude_none=False)
+        except Exception:
+            pass
+    return obj
+
 def test_live_url(url):
     """Test scraping from a live URL."""
     print(f"Testing live URL: {url}")
     scraper = PMCScraper()
     result = scraper.scrape_article(url)
     
+    data = _to_serializable(result) if not isinstance(result, dict) else result
+    if isinstance(data, dict) and 'error' in data:
+        print("Error:", data.get("error", data))
+        return result
+
     print("\n" + "="*50)
-    print("Results:")
+    print("Results (key fields):")
     print("="*50)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-    
-    # Save to file
+    for key in ('Title', 'title', 'Journal', 'journal', 'ISSN', 'issn', 'PMCID', 'pmcid', 'source'):
+        if isinstance(data, dict) and key in data and data[key] is not None:
+            print(f"  {key}: {data[key]}")
+    print("\nFull JSON saved to test_output.json")
+
     output_file = 'test_output.json'
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-    print(f"\nResults saved to: {output_file}")
-    
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    print(f"Results saved to: {output_file}")
     return result
 
 def test_from_file(file_path, url=None):
@@ -32,17 +49,19 @@ def test_from_file(file_path, url=None):
     scraper = PMCScraper()
     result = scraper.scrape_from_file(file_path, url)
     
+    data = _to_serializable(result) if not isinstance(result, dict) else result
     print("\n" + "="*50)
-    print("Results:")
+    print("Results (key fields):")
     print("="*50)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-    
-    # Save to file
+    for key in ('Title', 'title', 'Journal', 'journal', 'ISSN', 'issn', 'PMCID', 'pmcid', 'source'):
+        if isinstance(data, dict) and key in data and data[key] is not None:
+            print(f"  {key}: {data[key]}")
+    print("\nFull JSON saved to test_output.json")
+
     output_file = 'test_output.json'
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-    print(f"\nResults saved to: {output_file}")
-    
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    print(f"Results saved to: {output_file}")
     return result
 
 if __name__ == '__main__':
