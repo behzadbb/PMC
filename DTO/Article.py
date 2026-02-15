@@ -47,6 +47,7 @@ class Article(BaseModel):
     
     # ==================== Journal Information ====================
     Journal: Optional[str] = Field(None, description="Journal name", alias="journal")
+    ISSN: Optional[str] = Field(None, description="International Standard Serial Number", alias="issn")
     Volume: Optional[int] = Field(None, description="Journal volume number", alias="volume")
     Issue: Optional[int] = Field(None, description="Journal issue number", alias="issue")
     
@@ -105,6 +106,7 @@ class Article(BaseModel):
                 "type": "article",
                 "Authors": "Friedrich Finkenwirth, Franziska Kirsch, Thomas Eitinger",
                 "Journal": "Bioengineered",
+                "ISSN": "2165-5979",
                 "Volume": 5,
                 "Issue": 2,
                 "Publication_Date": "2013 Nov 5",
