@@ -154,7 +154,9 @@ class Api_XML:
             
             # Extract journal
             article_data['journal'] = self._get_text(article, './/journal-title')
-            
+            # Extract ISSN (JATS: journal-meta/issn; prefer epub then ppub)
+            article_data['issn'] = self._get_text(article, './/issn[@pub-type="epub"]') or self._get_text(article, './/issn')
+
             # Extract volume and issue (try to convert to int)
             vol_text = self._get_text(article, './/volume')
             if vol_text:

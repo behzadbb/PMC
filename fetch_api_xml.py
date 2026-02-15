@@ -29,6 +29,7 @@ def main():
         print(f"Year: {article.Year}")
         print(f"Authors: {article.Authors}")
         print(f"Journal: {article.Journal}")
+        print(f"ISSN: {article.ISSN}")
         print(f"Source: {article.source}")
         print(f"Has Abstract: {bool(article.Abstract)}")
         print(f"Has Full Text Sections: {bool(article.Full_Text_Sections)}")
