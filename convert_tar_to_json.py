@@ -21,7 +21,7 @@ def main():
     2. Process archive contents with streaming conversion.
     3. Print completion metrics.
     """
-    directory = Path("D:/PMC/Dataset/2026/tar_gz/")
+    directory = Path("g:/PMC/Dataset/2026/tar_gz/")
     tar_gz_file_paths = [str(directory / f) for f in os.listdir(directory) if f.endswith('.tar.gz')]
     
     print("=" * 60)

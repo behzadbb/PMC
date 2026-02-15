@@ -211,6 +211,12 @@ class Ftp_XML:
             journal_elem = article.find('.//journal-title')
             article_data['journal'] = journal_elem.text.strip() if journal_elem is not None and journal_elem.text else None
             
+            # Extract ISSN (JATS: prefer epub then any issn)
+            issn_elem = article.find('.//issn[@pub-type="epub"]')
+            if issn_elem is None:
+                issn_elem = article.find('.//issn')
+            article_data['issn'] = issn_elem.text.strip() if issn_elem is not None and issn_elem.text else None
+
             # Extract volume and issue
             vol_elem = article.find('.//volume')
             if vol_elem is not None and vol_elem.text:
