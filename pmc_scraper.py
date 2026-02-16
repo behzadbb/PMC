@@ -4,6 +4,7 @@ Extracts article metadata, abstract, full text, and other information from PMC a
 """
 
 import json
+import logging
 import os
 import re
 import warnings
@@ -16,6 +17,8 @@ import urllib3
 from bs4 import BeautifulSoup
 
 from DTO.Article import Article
+
+logger = logging.getLogger(__name__)
 
 # Optional Selenium imports (used as a fallback when HTTP is blocked)
 try:
@@ -47,7 +50,7 @@ class PMCScraper:
         
         # Try to load cached cookies and headers
         if self._load_session_cache():
-            print("Loaded cookies and headers from cache")
+            logger.info("Loaded cookies and headers from cache")
         else:
             # Initialize with default headers
             self.session.headers.update({
@@ -71,6 +74,20 @@ class PMCScraper:
             except:
                 pass
     
+    def load_browser(self) -> None:
+        """Create and store a Selenium Firefox driver in self._selenium_driver for reuse."""
+        if self._selenium_driver is not None:
+            return
+        if not _SELENIUM_AVAILABLE:
+            raise RuntimeError("Selenium is not available (install selenium and webdriver-manager)")
+        self._selenium_driver = self._get_selenium_driver()
+        if self._selenium_driver is None:
+            raise RuntimeError("Failed to create Selenium Firefox driver")
+
+    def has_selenium(self) -> bool:
+        """Return True if a Selenium driver is loaded (use scrape_article_selenium for web-only extraction)."""
+        return self._selenium_driver is not None and _SELENIUM_AVAILABLE
+        
     def _load_session_cache(self) -> bool:
         """
         Load cookies and headers from cache file.
@@ -100,7 +117,7 @@ class PMCScraper:
                 
                 return True
         except Exception as e:
-            print(f"Warning: Could not load session cache: {e}")
+            logger.warning("Could not load session cache: %s", e)
         
         return False
     
@@ -129,10 +146,10 @@ class PMCScraper:
             with open(self.cache_file, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, indent=2, ensure_ascii=False)
             
-            print(f"Saved cookies and headers to {self.cache_file}")
+            logger.info("Saved cookies and headers to %s", self.cache_file)
             return True
         except Exception as e:
-            print(f"Warning: Could not save session cache: {e}")
+            logger.warning("Could not save session cache: %s", e)
             return False
     
     def _refresh_session_from_selenium(self, url: str = "https://pmc.ncbi.nlm.nih.gov/") -> bool:
@@ -147,11 +164,11 @@ class PMCScraper:
             True if successful, False otherwise
         """
         if not _SELENIUM_AVAILABLE:
-            print("Selenium is not available, cannot refresh session")
+            logger.warning("Selenium is not available, cannot refresh session")
             return False
         
         try:
-            print("Refreshing cookies and headers using Selenium...")
+            logger.info("Refreshing cookies and headers using Selenium...")
             
             # Reuse existing driver if available
             if self._selenium_driver is None:
@@ -172,10 +189,10 @@ class PMCScraper:
             # Save to cache
             self._save_session_cache()
             
-            print("Successfully refreshed session from Selenium")
+            logger.info("Successfully refreshed session from Selenium")
             return True
         except Exception as e:
-            print(f"Error refreshing session from Selenium: {e}")
+            logger.error("Error refreshing session from Selenium: %s", e)
             # If driver failed, reset it
             if self._selenium_driver:
                 try:
@@ -216,7 +233,7 @@ class PMCScraper:
         else:
             # Fallback: try to extract from URL
             url = data_dict.get('url', '')
-            pmcid_match = re.search(r'PMC(\d+)', url)
+            pmcid_match = re.search(r'PMC(\d+)', url, re.IGNORECASE)
             if pmcid_match:
                 filename = f"PMC{pmcid_match.group(1)}.json"
             else:
@@ -248,12 +265,12 @@ class PMCScraper:
             # Extract PMCID from content or URL
             pmcid = None
             if url:
-                pmcid_match = re.search(r'PMC(\d+)', url)
+                pmcid_match = re.search(r'PMC(\d+)', url, re.IGNORECASE)
                 if pmcid_match:
                     pmcid = pmcid_match.group(1)
             
             if not pmcid:
-                pmcid_match = re.search(r'PMC(\d+)', content)
+                pmcid_match = re.search(r'PMC(\d+)', content, re.IGNORECASE)
                 if pmcid_match:
                     pmcid = pmcid_match.group(1)
             
@@ -266,88 +283,114 @@ class PMCScraper:
         except Exception as e:
             return {'error': str(e), 'file': file_path}
     
+    def scrape_article_selenium(self, url: str) -> Union[Article, Dict]:
+        """
+        Scrape a PMC article using only Selenium (no HTTP requests for the web page).
+        Call load_browser() before using this, or the driver will be created on first use.
+
+        Args:
+            url: PMC article URL (e.g., https://pmc.ncbi.nlm.nih.gov/articles/PMC4049904/)
+
+        Returns:
+            Article instance or Dict with 'error' key if failed.
+        """
+        try:
+            pmcid_match = re.search(r'PMC(\d+)', url, re.IGNORECASE)
+            if not pmcid_match:
+                logger.warning("scrape_article_selenium: could not extract PMCID from url=%s", url)
+                return {'error': 'Could not extract PMCID from URL', 'url': url}
+            pmcid = pmcid_match.group(1)
+            if not _SELENIUM_AVAILABLE:
+                logger.info("scrape_article_selenium: Selenium not available for pmcid=%s", pmcid)
+                return {'error': 'Selenium not available', 'url': url}
+            result = self._scrape_with_selenium(url, pmcid)
+            if result and result.get('title'):
+                return self._create_article_instance(result)
+            logger.debug("scrape_article_selenium: no title extracted for pmcid=%s", pmcid)
+            return result if isinstance(result, dict) else {'error': 'No title extracted', 'url': url}
+        except Exception as e:
+            logger.warning("scrape_article_selenium: exception for url=%s: %s", url, e)
+            return {'error': str(e), 'url': url}
+
     def scrape_article(self, url: str) -> Union[Article, Dict]:
         """
         Scrape a PMC article from the given URL.
-        
+        Prefers Selenium for web page extraction; HTTP requests for the HTML page are disabled.
+        XML/API fallbacks (2–5) still use HTTP for alternative endpoints.
+
         Args:
             url: PMC article URL (e.g., https://pmc.ncbi.nlm.nih.gov/articles/PMC4049904/)
-        
+
         Returns:
             Article instance containing all extracted article data, or Dict with error if failed
         """
         try:
-            # Extract PMCID from URL
-            pmcid_match = re.search(r'PMC(\d+)', url)
+            pmcid_match = re.search(r'PMC(\d+)', url, re.IGNORECASE)
             if not pmcid_match:
+                logger.warning("scrape_article: could not extract PMCID from URL=%s", url)
                 return {'error': 'Could not extract PMCID from URL', 'url': url}
-            
             pmcid = pmcid_match.group(1)
-            
-            # Try multiple approaches to get the article data
+            logger.debug("scrape_article: starting url=%s pmcid=%s", url, pmcid)
             errors = []
-            session_refreshed = False
-            
-            # Approach 1: Try HTML page (even if 403, sometimes content is there)
-            try:
-                response = self.session.get(url, timeout=30, allow_redirects=True, verify=False)
-                # Try to parse even if status is not 200
-                if response.content and len(response.content) > 1000:  # If we got substantial content
-                    soup = BeautifulSoup(response.content, 'lxml')
-                    result = self._extract_from_html(soup, url, pmcid)
-                    if result.get('title'):  # If we got meaningful data
-                        # Save session cache after successful request
-                        self._save_session_cache()
+
+            # Approach 1: Selenium only for web page (no HTTP request for the same page)
+            if _SELENIUM_AVAILABLE:
+                try:
+                    logger.debug("scrape_article: trying Approach 1 (Selenium) for pmcid=%s", pmcid)
+                    result = self._scrape_with_selenium(url, pmcid)
+                    if result and result.get('title'):
+                        logger.debug("scrape_article: Approach 1 (Selenium) succeeded for pmcid=%s", pmcid)
                         return self._create_article_instance(result)
-                
-                # If we got 403 or other access errors, try refreshing session only once
-                if response.status_code in [403, 401] and not session_refreshed:
-                    if self._selenium_driver is None and _SELENIUM_AVAILABLE:
-                        # Only refresh if we don't have a driver yet
-                        if self._refresh_session_from_selenium():
-                            session_refreshed = True
-                            # Retry the request
-                            response = self.session.get(url, timeout=30, allow_redirects=True, verify=False)
-                            if response.status_code == 200 and response.content and len(response.content) > 1000:
-                                soup = BeautifulSoup(response.content, 'lxml')
-                                result = self._extract_from_html(soup, url, pmcid)
-                                if result.get('title'):
-                                    return self._create_article_instance(result)
-                
-                if response.status_code != 200:
-                    errors.append(f"HTML approach: Status {response.status_code}, Content length: {len(response.content) if response.content else 0}")
-            except Exception as e:
-                errors.append(f"HTML approach: {str(e)}")
-            
+                    logger.debug("scrape_article: Approach 1 (Selenium) returned no title for pmcid=%s", pmcid)
+                except Exception as e:
+                    errors.append(f"Selenium: {str(e)}")
+                    logger.info("scrape_article: Approach 1 (Selenium) failed for pmcid=%s: %s", pmcid, e)
+            else:
+                errors.append("Selenium: not available")
+                logger.info("scrape_article: Selenium not available, skipping Approach 1 for pmcid=%s", pmcid)
+
+            # (HTTP request for HTML page commented out – we use Selenium for web page extraction.)
+            # # Approach: session.get(url) ...
+            # # Approach: requests.get(url) ...
+
             # Approach 2: Try XML version (often more accessible)
             xml_url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/?report=xml"
+            logger.debug("scrape_article: trying Approach 2 (XML) for pmcid=%s: %s", pmcid, xml_url)
             try:
                 response = self.session.get(xml_url, timeout=30, verify=False)
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.content, 'xml')
                     result = self._extract_from_xml(soup, url, pmcid)
                     if result.get('title'):  # If we got meaningful data
+                        logger.debug("scrape_article: Approach 2 (XML) succeeded for pmcid=%s", pmcid)
                         return self._create_article_instance(result)
+                    logger.debug("scrape_article: Approach 2 (XML) returned no title for pmcid=%s", pmcid)
                 else:
                     errors.append(f"XML approach: Status {response.status_code}")
+                    logger.debug("scrape_article: Approach 2 (XML) status=%s for pmcid=%s", response.status_code, pmcid)
             except Exception as e:
                 errors.append(f"XML approach: {str(e)}")
+                logger.debug("scrape_article: Approach 2 (XML) failed for pmcid=%s: %s", pmcid, e)
             
             # Approach 3: Try PMC FTP XML (alternative format)
             ftp_xml_url = f"https://ftp.ncbi.nlm.nih.gov/pub/pmc/{pmcid[:3]}/PMC{pmcid}.xml"
+            logger.debug("scrape_article: trying Approach 3 (FTP XML) for pmcid=%s", pmcid)
             try:
                 response = self.session.get(ftp_xml_url, timeout=30, verify=False)
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.content, 'xml')
                     result = self._extract_from_xml(soup, url, pmcid)
                     if result.get('title'):
+                        logger.debug("scrape_article: Approach 3 (FTP XML) succeeded for pmcid=%s", pmcid)
                         return self._create_article_instance(result)
                 else:
                     errors.append(f"FTP XML approach: Status {response.status_code}")
             except Exception as e:
                 errors.append(f"FTP XML approach: {str(e)}")
+                logger.debug("scrape_article: Approach 3 (FTP XML) failed for pmcid=%s: %s", pmcid, e)
             
             # Approach 4: Try using NCBI E-utilities API (official API)
+            logger.debug("scrape_article: trying Approach 4 (E-utilities API) for pmcid=%s", pmcid)
             try:
                 # First get PMID from PMC ID
                 esummary_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pmc&id={pmcid}"
@@ -360,11 +403,14 @@ class PMCScraper:
                         soup = BeautifulSoup(api_response.content, 'xml')
                         result = self._extract_from_xml(soup, url, pmcid)
                         if result.get('title'):
+                            logger.debug("scrape_article: Approach 4 (E-utilities) succeeded for pmcid=%s", pmcid)
                             return self._create_article_instance(result)
             except Exception as e:
                 errors.append(f"E-utilities API: {str(e)}")
+                logger.debug("scrape_article: Approach 4 (E-utilities) failed for pmcid=%s: %s", pmcid, e)
             
             # Approach 5: Try PMC OAI-PMH endpoint (designed for programmatic access)
+            logger.debug("scrape_article: trying Approach 5 (OAI-PMH) for pmcid=%s", pmcid)
             try:
                 oai_url = f"https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi?verb=GetRecord&identifier=oai:pubmedcentral.nih.gov:{pmcid}&metadataPrefix=pmc"
                 oai_response = self.session.get(oai_url, timeout=30, verify=False)
@@ -379,33 +425,17 @@ class PMCScraper:
                             if article:
                                 result = self._extract_from_xml(article, url, pmcid)
                                 if result.get('title'):
+                                    logger.debug("scrape_article: Approach 5 (OAI-PMH) succeeded for pmcid=%s", pmcid)
                                     return self._create_article_instance(result)
             except Exception as e:
                 errors.append(f"OAI-PMH: {str(e)}")
+                logger.debug("scrape_article: Approach 5 (OAI-PMH) failed for pmcid=%s: %s", pmcid, e)
 
-            # Approach 6: Try Selenium (headless Firefox) to get real browser HTML & cookies
-            if _SELENIUM_AVAILABLE:
-                try:
-                    result = self._scrape_with_selenium(url, pmcid)
-                    if result and result.get('title'):
-                        return self._create_article_instance(result)
-                except Exception as e:
-                    errors.append(f"Selenium (Firefox): {str(e)}")
-            else:
-                errors.append("Selenium (Firefox): not available (package not installed or import failed)")
+            # (No further HTTP request for the HTML page – web page is fetched only via Selenium above.)
+            # # Approach: requests.get(url) for HTML – commented out.
 
-            # Approach 7: Try using requests directly (bypass session)
-            try:
-                response = requests.get(url, headers=self.session.headers, timeout=30, verify=False)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.content, 'lxml')
-                    result = self._extract_from_html(soup, url, pmcid)
-                    if result.get('title'):
-                        return self._create_article_instance(result)
-            except Exception as e:
-                errors.append(f"Direct requests: {str(e)}")
-            
             # If all approaches fail, return error with details
+            logger.info("scrape_article: all 5 approaches failed for pmcid=%s; attempted_methods=%s", pmcid, errors)
             return {
                 'error': 'Could not access article using any method',
                 'url': url,
@@ -413,6 +443,7 @@ class PMCScraper:
             }
             
         except Exception as e:
+            logger.exception("scrape_article: exception for url=%s: %s", url, e)
             return {'error': str(e), 'url': url}
     
     @staticmethod
@@ -466,6 +497,7 @@ class PMCScraper:
             return Article(**data)
         except Exception as e:
             data['_article_creation_error'] = str(e)
+            logger.debug("_create_article_instance: Article validation failed: %s", e)
             return data
     
     def _extract_from_html(self, soup: BeautifulSoup, url: str, pmcid: str) -> Dict:
@@ -653,17 +685,23 @@ class PMCScraper:
         Returns None if Selenium is not available.
         """
         if not _SELENIUM_AVAILABLE:
+            logger.debug("_get_selenium_driver: Selenium not available")
             return None
+        try:
+            logger.debug("_get_selenium_driver: installing/loading GeckoDriver and starting Firefox")
+            options = FirefoxOptions()
+            options.add_argument("--headless")
+            options.set_preference("dom.webnotifications.enabled", False)
+            options.set_preference("media.volume_scale", "0.0")
 
-        options = FirefoxOptions()
-        options.add_argument("--headless")
-        options.set_preference("dom.webnotifications.enabled", False)
-        options.set_preference("media.volume_scale", "0.0")
-
-        service = FirefoxService(GeckoDriverManager().install())
-        driver = webdriver.Firefox(service=service, options=options)
-        driver.set_page_load_timeout(60)
-        return driver
+            service = FirefoxService(GeckoDriverManager().install())
+            driver = webdriver.Firefox(service=service, options=options)
+            driver.set_page_load_timeout(60)
+            logger.debug("_get_selenium_driver: Firefox driver created successfully")
+            return driver
+        except Exception as e:
+            logger.warning("_get_selenium_driver: failed to create driver: %s", e, exc_info=True)
+            return None
 
     def _update_session_from_selenium(self, driver) -> None:
         """
@@ -694,14 +732,18 @@ class PMCScraper:
         """
         # Reuse existing driver if available
         if self._selenium_driver is None:
+            logger.debug("_scrape_with_selenium: creating new driver for pmcid=%s", pmcid)
             driver = self._get_selenium_driver()
             if driver is None:
+                logger.warning("_scrape_with_selenium: _get_selenium_driver returned None for pmcid=%s", pmcid)
                 raise RuntimeError("Selenium driver is not available")
             self._selenium_driver = driver
         else:
             driver = self._selenium_driver
+            logger.debug("_scrape_with_selenium: reusing existing driver for pmcid=%s", pmcid)
 
         try:
+            logger.debug("_scrape_with_selenium: driver.get(%s)", url)
             driver.get(url)
 
             # Optional: wait a short time for dynamic content (PMC pages are mostly static)
@@ -709,6 +751,7 @@ class PMCScraper:
 
             # Get final HTML after any redirects / JS
             page_source = driver.page_source
+            logger.debug("_scrape_with_selenium: got page_source len=%s for pmcid=%s", len(page_source), pmcid)
 
             # Update requests session with browser cookies for later HTTP calls
             self._update_session_from_selenium(driver)
@@ -718,6 +761,8 @@ class PMCScraper:
 
             soup = BeautifulSoup(page_source, "lxml")
             result = self._extract_from_html(soup, url, pmcid)
+            has_title = bool(result.get("title"))
+            logger.debug("_scrape_with_selenium: _extract_from_html title=%s for pmcid=%s", has_title, pmcid)
 
             # If we at least have a title, consider it a success
             if result.get("title"):
@@ -725,11 +770,12 @@ class PMCScraper:
 
             return result
         except Exception as e:
+            logger.warning("_scrape_with_selenium: exception for pmcid=%s: %s", pmcid, e, exc_info=True)
             # If driver failed, reset it
             if self._selenium_driver:
                 try:
                     self._selenium_driver.quit()
-                except:
+                except Exception:
                     pass
                 self._selenium_driver = None
             raise
@@ -918,7 +964,7 @@ class PMCScraper:
     def _extract_pmcid(self, soup: BeautifulSoup, url: str) -> Optional[str]:
         """Extract PMCID from URL or content."""
         # Extract from URL first
-        pmcid_match = re.search(r'PMC(\d+)', url)
+        pmcid_match = re.search(r'PMC(\d+)', url, re.IGNORECASE)
         if pmcid_match:
             return f"PMC{pmcid_match.group(1)}"
         
