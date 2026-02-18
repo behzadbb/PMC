@@ -21,6 +21,37 @@ from lxml import etree
 from tqdm import tqdm
 from DTO.Article import Article
 
+# JATS namespace for compiled XPath
+_JATS_NS = "http://www.ncbi.nlm.nih.gov/JATS1"
+_NSMAP = {"jats": _JATS_NS}
+
+# Compiled XPath expressions (evaluated once at import, reused for every article)
+_XP_ARTICLE = etree.XPath(".//article")
+_XP_ARTICLE_JATS = etree.XPath(".//jats:article", namespaces=_NSMAP)
+_XP_ARTICLE_ID_PMC = etree.XPath(".//article-id[@pub-id-type='pmc']")
+_XP_ARTICLE_ID_DOI = etree.XPath(".//article-id[@pub-id-type='doi']")
+_XP_ARTICLE_ID_PMID = etree.XPath(".//article-id[@pub-id-type='pmid']")
+_XP_ARTICLE_TITLE = etree.XPath(".//article-title")
+_XP_TITLE = etree.XPath(".//title")
+_XP_CONTRIB_AUTHOR = etree.XPath(".//contrib[@contrib-type='author']")
+_XP_SURNAME = etree.XPath(".//surname")
+_XP_GIVEN_NAMES = etree.XPath(".//given-names")
+_XP_ABSTRACT = etree.XPath(".//abstract")
+_XP_P = etree.XPath(".//p")
+_XP_KWD = etree.XPath(".//kwd")
+_XP_JOURNAL_TITLE = etree.XPath(".//journal-title")
+_XP_ISSN_EPUB = etree.XPath(".//issn[@pub-type='epub']")
+_XP_ISSN = etree.XPath(".//issn")
+_XP_VOLUME = etree.XPath(".//volume")
+_XP_ISSUE = etree.XPath(".//issue")
+_XP_PUB_DATE_TYPE = etree.XPath(".//pub-date[@pub-type=$pub_type]")
+_XP_PUB_DATE = etree.XPath(".//pub-date")
+_XP_YEAR = etree.XPath(".//year")
+_XP_MONTH = etree.XPath(".//month")
+_XP_DAY = etree.XPath(".//day")
+_XP_BODY = etree.XPath(".//body")
+_XP_SEC = etree.XPath(".//sec")
+
 
 class Ftp_XML:
     """
@@ -32,22 +63,10 @@ class Ftp_XML:
     - Persist DTO output to JSON in an incremental, low-memory workflow.
     """
     
-    def __init__(self, save_directory: str, exclusion_keywords: Optional[List[str]] = None):
+    def __init__(self, save_directory: str):
         """Initialize the FTP XML parser instance."""
         self.pmc_ids = []
-        self.exclusion_keywords_lower: Optional[List[str]] = None
-        self.exclusion_keywords_pattern: Optional[re.Pattern] = None
         self.save_directory: str = str(save_directory)  # Convert Path to str if needed
-        
-        if exclusion_keywords is not None and len(exclusion_keywords) > 0:
-            # Pre-process keywords: convert to lowercase once
-            self.exclusion_keywords_lower = [kw.lower() for kw in exclusion_keywords]
-            
-            # Create compiled regex pattern for faster matching
-            # Escape special regex characters and join with | (OR)
-            escaped_keywords = [re.escape(kw.lower()) for kw in exclusion_keywords]
-            pattern = '|'.join(escaped_keywords)
-            self.exclusion_keywords_pattern = re.compile(pattern, re.IGNORECASE)
     
     @staticmethod
     def _parse_publication_date(year: Optional[str], month: Optional[str], day: Optional[str]) -> Optional[datetime]:
@@ -116,14 +135,16 @@ class Ftp_XML:
             # Parse XML with lxml
             root = etree.fromstring(xml_content)
             
-            # The root element is typically the article element
-            article = root
-            if article.tag != 'article':
-                # Try to find article element if root is not article
-                article = root.find('.//article')
-                if article is None:
-                    # Try with namespace
-                    article = root.find('.//{http://www.ncbi.nlm.nih.gov/JATS1}article')
+            # The root element is typically the article element (use compiled XPath)
+            article = None
+            if root.tag == 'article' or (root.tag and '}' in root.tag and root.tag.endswith('}article')):
+                article = root
+            if article is None:
+                lst = _XP_ARTICLE(root)
+                article = lst[0] if lst else None
+            if article is None:
+                lst = _XP_ARTICLE_JATS(root)
+                article = lst[0] if lst else None
             
             if article is None:
                 return Article(
@@ -133,8 +154,9 @@ class Ftp_XML:
                     error_message="Article element not found in XML"
                 )
             
-            # Extract identifiers - try to get PMC ID from XML first
-            pmc_id_elem = article.find('.//article-id[@pub-id-type="pmc"]')
+            # Extract identifiers - try to get PMC ID from XML first (compiled XPath)
+            pmc_id_elems = _XP_ARTICLE_ID_PMC(article)
+            pmc_id_elem = pmc_id_elems[0] if pmc_id_elems else None
             extracted_pmc_id = pmc_id
             if pmc_id_elem is not None and pmc_id_elem.text:
                 # Extract PMC ID from XML (e.g., "PMC11000225" -> 11000225)
@@ -162,12 +184,14 @@ class Ftp_XML:
                 'type': 'article',
             }
             
-            # Extract DOI
-            doi_elem = article.find('.//article-id[@pub-id-type="doi"]')
+            # Extract DOI (compiled XPath)
+            doi_elems = _XP_ARTICLE_ID_DOI(article)
+            doi_elem = doi_elems[0] if doi_elems else None
             article_data['doi'] = doi_elem.text.strip() if doi_elem is not None and doi_elem.text else None
             
-            # Extract PMID - set to None if not found
-            pmid_elem = article.find('.//article-id[@pub-id-type="pmid"]')
+            # Extract PMID - set to None if not found (compiled XPath)
+            pmid_elems = _XP_ARTICLE_ID_PMID(article)
+            pmid_elem = pmid_elems[0] if pmid_elems else None
             if pmid_elem is not None and pmid_elem.text:
                 try:
                     article_data['pmid'] = int(pmid_elem.text.strip())
@@ -176,21 +200,24 @@ class Ftp_XML:
             else:
                 article_data['pmid'] = None
             
-            # Extract title - use itertext() to get all text including nested elements
-            title_elem = article.find('.//article-title')
+            # Extract title - use itertext() to get all text (compiled XPath)
+            article_title_elems = _XP_ARTICLE_TITLE(article)
+            title_elem = article_title_elems[0] if article_title_elems else None
             if title_elem is not None:
                 title_text = ' '.join(title_elem.itertext()).strip()
                 article_data['title'] = title_text if title_text else None
             else:
-                # Fallback to title element
-                title_elem = article.find('.//title')
+                title_elems = _XP_TITLE(article)
+                title_elem = title_elems[0] if title_elems else None
                 article_data['title'] = ' '.join(title_elem.itertext()).strip() if title_elem is not None else None
             
-            # Extract authors
+            # Extract authors (compiled XPath)
             authors = []
-            for contrib in article.findall('.//contrib[@contrib-type="author"]'):
-                surname_elem = contrib.find('.//surname')
-                given_elem = contrib.find('.//given-names')
+            for contrib in _XP_CONTRIB_AUTHOR(article):
+                surname_elems = _XP_SURNAME(contrib)
+                given_elems = _XP_GIVEN_NAMES(contrib)
+                surname_elem = surname_elems[0] if surname_elems else None
+                given_elem = given_elems[0] if given_elems else None
                 if surname_elem is not None and given_elem is not None:
                     surname = surname_elem.text.strip() if surname_elem.text else ''
                     given = given_elem.text.strip() if given_elem.text else ''
@@ -199,11 +226,11 @@ class Ftp_XML:
             if authors:
                 article_data['authors'] = ', '.join(authors)
             
-            # Extract abstract - handle both structured and unstructured abstracts
-            abstract = article.find('.//abstract')
+            # Extract abstract - handle both structured and unstructured (compiled XPath)
+            abstract_elems = _XP_ABSTRACT(article)
+            abstract = abstract_elems[0] if abstract_elems else None
             if abstract is not None:
-                # Try to get paragraphs first
-                paras = abstract.findall('.//p')
+                paras = _XP_P(abstract)
                 if paras:
                     abstract_text = '\n'.join([' '.join(p.itertext()).strip() for p in paras if p is not None])
                 else:
@@ -213,26 +240,30 @@ class Ftp_XML:
             else:
                 article_data['abstract'] = None
             
-            # Extract keywords
+            # Extract keywords (compiled XPath)
             keywords = []
-            for kwd in article.findall('.//kwd'):
+            for kwd in _XP_KWD(article):
                 if kwd.text:
                     keywords.append(kwd.text.strip())
             if keywords:
                 article_data['keywords'] = ', '.join(keywords)
             
-            # Extract journal
-            journal_elem = article.find('.//journal-title')
+            # Extract journal (compiled XPath)
+            journal_elems = _XP_JOURNAL_TITLE(article)
+            journal_elem = journal_elems[0] if journal_elems else None
             article_data['journal'] = journal_elem.text.strip() if journal_elem is not None and journal_elem.text else None
             
-            # Extract ISSN (JATS: prefer epub then any issn)
-            issn_elem = article.find('.//issn[@pub-type="epub"]')
+            # Extract ISSN (JATS: prefer epub then any issn) (compiled XPath)
+            issn_epub_elems = _XP_ISSN_EPUB(article)
+            issn_elem = issn_epub_elems[0] if issn_epub_elems else None
             if issn_elem is None:
-                issn_elem = article.find('.//issn')
+                issn_elems = _XP_ISSN(article)
+                issn_elem = issn_elems[0] if issn_elems else None
             article_data['issn'] = issn_elem.text.strip() if issn_elem is not None and issn_elem.text else None
 
-            # Extract volume and issue
-            vol_elem = article.find('.//volume')
+            # Extract volume and issue (compiled XPath)
+            vol_elems = _XP_VOLUME(article)
+            vol_elem = vol_elems[0] if vol_elems else None
             if vol_elem is not None and vol_elem.text:
                 vol_text = vol_elem.text.strip()
                 try:
@@ -240,7 +271,8 @@ class Ftp_XML:
                 except ValueError:
                     article_data['volume'] = vol_text
             
-            issue_elem = article.find('.//issue')
+            issue_elems = _XP_ISSUE(article)
+            issue_elem = issue_elems[0] if issue_elems else None
             if issue_elem is not None and issue_elem.text:
                 issue_text = issue_elem.text.strip()
                 try:
@@ -248,25 +280,24 @@ class Ftp_XML:
                 except ValueError:
                     article_data['issue'] = issue_text
             
-            # Extract publication date and year
-            # Priority order: epub > ppub > pmc-release > any other pub-date
+            # Extract publication date and year (compiled XPath, priority: epub > ppub > pmc-release > any)
             pub_date = None
-            pub_date_types = ['epub', 'ppub', 'pmc-release']
-            
-            # Try to find pub-date in priority order
-            for pub_type in pub_date_types:
-                pub_date = article.find(f'.//pub-date[@pub-type="{pub_type}"]')
-                if pub_date is not None:
+            for pub_type in ('epub', 'ppub', 'pmc-release'):
+                pd_list = _XP_PUB_DATE_TYPE(article, pub_type=pub_type)
+                if pd_list:
+                    pub_date = pd_list[0]
                     break
-            
-            # If no priority pub-date found, try any pub-date
             if pub_date is None:
-                pub_date = article.find('.//pub-date')
+                pd_list = _XP_PUB_DATE(article)
+                pub_date = pd_list[0] if pd_list else None
             
             if pub_date is not None:
-                year_elem = pub_date.find('.//year')
-                month_elem = pub_date.find('.//month')
-                day_elem = pub_date.find('.//day')
+                year_elems = _XP_YEAR(pub_date)
+                month_elems = _XP_MONTH(pub_date)
+                day_elems = _XP_DAY(pub_date)
+                year_elem = year_elems[0] if year_elems else None
+                month_elem = month_elems[0] if month_elems else None
+                day_elem = day_elems[0] if day_elems else None
                 
                 year = year_elem.text.strip() if year_elem is not None and year_elem.text else None
                 month = month_elem.text.strip() if month_elem is not None and month_elem.text else None
@@ -279,18 +310,18 @@ class Ftp_XML:
                 if year:
                     article_data['year'] = year
             
-            # Extract full text sections
-            body = article.find('.//body')
+            # Extract full text sections (compiled XPath)
+            body_elems = _XP_BODY(article)
+            body = body_elems[0] if body_elems else None
             if body is not None:
                 sections = {}
-                for sec in body.findall('.//sec'):
-                    title_elem = sec.find('.//title')
+                for sec in _XP_SEC(body):
+                    sec_title_elems = _XP_TITLE(sec)
+                    title_elem = sec_title_elems[0] if sec_title_elems else None
                     if title_elem is not None:
-                        # Get title text using itertext to handle nested elements
                         title = ' '.join(title_elem.itertext()).strip()
                         if title:
-                            # Get all paragraphs in this section
-                            paras = sec.findall('.//p')
+                            paras = _XP_P(sec)
                             if paras:
                                 content = '\n'.join([' '.join(p.itertext()).strip() for p in paras if p is not None])
                             else:
@@ -472,7 +503,6 @@ class Ftp_XML:
         
         article_count = 0
         batch: List[Article] = []
-        exclude_articles: List[Article] = []
         batch_index = 0
         files_written = 0
         pmc_ids_path = dir_path / "pmc_ids.txt"
@@ -482,26 +512,14 @@ class Ftp_XML:
 
         try:
             # Wrap the generator with tqdm for progress tracking
-            article_generator = self.process_tar_gz_file(tar_gz_file_path)
+            article_generator: Iterator[Article] = self.process_tar_gz_file(tar_gz_file_path)
             pbar_kwargs = {"desc": "Processing articles", "unit": "article"}
             if total_articles > 0:
                 pbar_kwargs["total"] = total_articles
             for article in tqdm(article_generator, **pbar_kwargs):
                 article_count += 1
                 
-                # Check if article should be excluded based on keywords (optimized)
-                should_exclude = False
-                if self.exclusion_keywords_pattern:
-                    # Combine title and abstract for single search
-                    combined_text = f"{(article.Title or '')} {(article.Abstract or '')}"
-                    # Use compiled regex pattern for fast matching
-                    if self.exclusion_keywords_pattern.search(combined_text):
-                        should_exclude = True
-                
-                if should_exclude:
-                    exclude_articles.append(article)
-                else:
-                    batch.append(article)
+                batch.append(article)
                     
                 if article.PMCID is not None:
                     pmc_ids_list.append(article.PMCID)
@@ -513,13 +531,6 @@ class Ftp_XML:
                     files_written += 1
                     batch.clear()
                     batch_index += 1
-                if len(exclude_articles) >= BATCH_SIZE:
-                    exclude_articles_file = dir_path / f"exclude_articles_{batch_index:04d}.json.tar.gz"
-                    self._write_batch(exclude_articles, exclude_articles_file)
-                    print(f"[INFO] Wrote exclude articles batch {batch_index} ({len(exclude_articles)} articles) -> {exclude_articles_file}")
-                    files_written += 1
-                    exclude_articles.clear()
-                    batch_index += 1
 
             if batch:
                 batch_file = dir_path / f"batch_{batch_index:04d}.json.tar.gz"
@@ -527,12 +538,7 @@ class Ftp_XML:
                 print(f"[INFO] Wrote final batch {batch_index} ({len(batch)} articles) -> {batch_file}")
                 files_written += 1
                 batch.clear()
-            if exclude_articles:
-                exclude_articles_file = dir_path / f"exclude_articles_{batch_index:04d}.json.tar.gz"
-                self._write_batch(exclude_articles, exclude_articles_file)
-                print(f"[INFO] Wrote final exclude articles batch {batch_index} ({len(exclude_articles)} articles) -> {exclude_articles_file}")
-                files_written += 1
-                exclude_articles.clear()
+
 
             # Write all PMC IDs to file in one go
             # if pmc_ids_list:

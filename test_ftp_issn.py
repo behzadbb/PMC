@@ -19,7 +19,7 @@ XML_SAMPLE = b"""<?xml version="1.0"?>
 </article>"""
 
 def main():
-    ftp = Ftp_XML()
+    ftp = Ftp_XML(save_directory=".")
     article = ftp.parse_xml_to_article(XML_SAMPLE, 99999)
     print("Journal:", article.Journal)
     print("ISSN:", article.ISSN)
