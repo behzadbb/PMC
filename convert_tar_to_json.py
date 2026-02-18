@@ -34,7 +34,7 @@ def main():
     # Load exclusion keywords from CSV file
     exclusion_keywords_ids_path = directory / "exclusion_keywords.csv"
     
-    save_directory = Path("/Home/pmc_2026/json_gz/")
+    save_directory = Path("/home/breg/pmc_2026/json_gz/")
     if not save_directory.exists():
         save_directory.mkdir(parents=True, exist_ok=True)
     

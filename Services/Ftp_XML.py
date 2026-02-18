@@ -35,10 +35,19 @@ class Ftp_XML:
     def __init__(self, save_directory: str, exclusion_keywords: Optional[List[str]] = None):
         """Initialize the FTP XML parser instance."""
         self.pmc_ids = []
-        self.exclusion_keywords: Optional[List[str]] = None
+        self.exclusion_keywords_lower: Optional[List[str]] = None
+        self.exclusion_keywords_pattern: Optional[re.Pattern] = None
         self.save_directory: str = str(save_directory)  # Convert Path to str if needed
-        if exclusion_keywords is not None:
-            self.exclusion_keywords = exclusion_keywords
+        
+        if exclusion_keywords is not None and len(exclusion_keywords) > 0:
+            # Pre-process keywords: convert to lowercase once
+            self.exclusion_keywords_lower = [kw.lower() for kw in exclusion_keywords]
+            
+            # Create compiled regex pattern for faster matching
+            # Escape special regex characters and join with | (OR)
+            escaped_keywords = [re.escape(kw.lower()) for kw in exclusion_keywords]
+            pattern = '|'.join(escaped_keywords)
+            self.exclusion_keywords_pattern = re.compile(pattern, re.IGNORECASE)
     
     @staticmethod
     def _parse_publication_date(year: Optional[str], month: Optional[str], day: Optional[str]) -> Optional[datetime]:
@@ -480,16 +489,14 @@ class Ftp_XML:
             for article in tqdm(article_generator, **pbar_kwargs):
                 article_count += 1
                 
-                # Check if article should be excluded based on keywords
+                # Check if article should be excluded based on keywords (optimized)
                 should_exclude = False
-                if self.exclusion_keywords:
-                    title_text = (article.Title or "").lower()
-                    abstract_text = (article.Abstract or "").lower()
-                    for keyword in self.exclusion_keywords:
-                        keyword_lower = keyword.lower()
-                        if keyword_lower in title_text or keyword_lower in abstract_text:
-                            should_exclude = True
-                            break
+                if self.exclusion_keywords_pattern:
+                    # Combine title and abstract for single search
+                    combined_text = f"{(article.Title or '')} {(article.Abstract or '')}"
+                    # Use compiled regex pattern for fast matching
+                    if self.exclusion_keywords_pattern.search(combined_text):
+                        should_exclude = True
                 
                 if should_exclude:
                     exclude_articles.append(article)
