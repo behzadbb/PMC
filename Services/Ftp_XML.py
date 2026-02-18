@@ -18,6 +18,7 @@ from typing import List, Optional, Iterator
 BATCH_SIZE = 10_000
 from datetime import datetime
 from lxml import etree
+from tqdm import tqdm
 from DTO.Article import Article
 
 
@@ -31,9 +32,13 @@ class Ftp_XML:
     - Persist DTO output to JSON in an incremental, low-memory workflow.
     """
     
-    def __init__(self):
+    def __init__(self, save_directory: str, exclusion_keywords: Optional[List[str]] = None):
         """Initialize the FTP XML parser instance."""
         self.pmc_ids = []
+        self.exclusion_keywords: Optional[List[str]] = None
+        self.save_directory: str = str(save_directory)  # Convert Path to str if needed
+        if exclusion_keywords is not None:
+            self.exclusion_keywords = exclusion_keywords
     
     @staticmethod
     def _parse_publication_date(year: Optional[str], month: Optional[str], day: Optional[str]) -> Optional[datetime]:
@@ -335,59 +340,57 @@ class Ftp_XML:
         
         with tarfile.open(tar_gz_file_path, 'r:gz') as tar:
             members = tar.getmembers()
-            total_files = len([m for m in members if m.name.endswith('.xml')])
+            xml_members = [m for m in members if m.name.endswith('.xml')]
+            total_files = len(xml_members)
             print(f"[INFO] Found {total_files} XML files in archive")
             
-            processed = 0
             flag_first_article = True
             
-            for member in members:
-                if not member.name.endswith('.xml'):
-                    continue
-                
-                processed += 1
-                if processed % 1000 == 0:
-                    print(f"[PROGRESS] Processed {processed}/{total_files} files...")
-                
-                try:
-                    # Extract XML content
-                    xml_file = tar.extractfile(member)
-                    if xml_file is None:
-                        continue
-                    
+            with tqdm(total=total_files, desc="Processing XML files", unit="file") as pbar:
+                for member in xml_members:
                     try:
-                        xml_content = xml_file.read()
-                        
-                        if flag_first_article:
-                            flag_first_article = False
-                            # Show first 200 characters of XML content for debugging
-                            xml_preview = xml_content[:200].decode('utf-8', errors='ignore') if isinstance(xml_content, bytes) else str(xml_content)[:200]
-                            print(f"[INFO] First article XML preview (first 200 chars): {xml_preview}...")
-                        
-                        # Extract PMC ID from filename
-                        pmc_id = self.extract_pmc_id_from_filename(member.name)
-                        if pmc_id is None:
-                            print(f"[WARNING] Could not extract PMC ID from {member.name}, skipping...")
+                        # Extract XML content
+                        xml_file = tar.extractfile(member)
+                        if xml_file is None:
+                            pbar.update(1)
                             continue
                         
-                        # Parse XML to Article
-                        article = self.parse_xml_to_article(xml_content, pmc_id)
+                        try:
+                            xml_content = xml_file.read()
+                            
+                            if flag_first_article:
+                                flag_first_article = False
+                                # Show first 200 characters of XML content for debugging
+                                xml_preview = xml_content[:200].decode('utf-8', errors='ignore') if isinstance(xml_content, bytes) else str(xml_content)[:200]
+                                print(f"[INFO] First article XML preview (first 200 chars): {xml_preview}...")
+                            
+                            # Extract PMC ID from filename
+                            pmc_id = self.extract_pmc_id_from_filename(member.name)
+                            if pmc_id is None:
+                                print(f"[WARNING] Could not extract PMC ID from {member.name}, skipping...")
+                                pbar.update(1)
+                                continue
+                            
+                            # Parse XML to Article
+                            article = self.parse_xml_to_article(xml_content, pmc_id)
+                            
+                            # Clear XML content from memory
+                            del xml_content
+                            
+                            yield article
+                            
+                            # Clear article from memory after yielding
+                            del article
+                        finally:
+                            # Close file handle
+                            if xml_file:
+                                xml_file.close()
                         
-                        # Clear XML content from memory
-                        del xml_content
-                        
-                        yield article
-                        
-                        # Clear article from memory after yielding
-                        del article
-                    finally:
-                        # Close file handle
-                        if xml_file:
-                            xml_file.close()
-                        
-                except Exception as e:
-                    print(f"[ERROR] Failed to process {member.name}: {str(e)}")
-                    continue
+                        pbar.update(1)
+                    except Exception as e:
+                        print(f"[ERROR] Failed to process {member.name}: {str(e)}")
+                        pbar.update(1)
+                        continue
 
     def _article_to_dict(self, article: Article) -> dict:
         """Serialize Article to dict for JSON (Pydantic v1/v2 compatible)."""
@@ -440,7 +443,7 @@ class Ftp_XML:
             base_name = archive_name[:-7]  # len('.tar.gz') == 7
         else:
             base_name = input_path.stem
-        dir_path = input_path.parent / base_name
+        dir_path = Path(self.save_directory) / base_name
         try:
             dir_path.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -448,26 +451,67 @@ class Ftp_XML:
             return 0
 
         print(f"[STEP 2] Extracting XML files from tar.gz (output dir: {dir_path})...")
+        
+        # Count total XML files for progress bar
+        total_articles = 0
+        try:
+            with tarfile.open(tar_gz_file_path, 'r:gz') as tar:
+                members = tar.getmembers()
+                total_articles = len([m for m in members if m.name.endswith('.xml')])
+        except Exception:
+            pass  # Will use tqdm without total if counting fails
+        
         article_count = 0
         batch: List[Article] = []
+        exclude_articles: List[Article] = []
         batch_index = 0
         files_written = 0
         pmc_ids_path = dir_path / "pmc_ids.txt"
         pmc_ids_list: List[int] = []
+        
+        
 
         try:
-            for article in self.process_tar_gz_file(tar_gz_file_path):
+            # Wrap the generator with tqdm for progress tracking
+            article_generator = self.process_tar_gz_file(tar_gz_file_path)
+            pbar_kwargs = {"desc": "Processing articles", "unit": "article"}
+            if total_articles > 0:
+                pbar_kwargs["total"] = total_articles
+            for article in tqdm(article_generator, **pbar_kwargs):
                 article_count += 1
-                batch.append(article)
+                
+                # Check if article should be excluded based on keywords
+                should_exclude = False
+                if self.exclusion_keywords:
+                    title_text = (article.Title or "").lower()
+                    abstract_text = (article.Abstract or "").lower()
+                    for keyword in self.exclusion_keywords:
+                        keyword_lower = keyword.lower()
+                        if keyword_lower in title_text or keyword_lower in abstract_text:
+                            should_exclude = True
+                            break
+                
+                if should_exclude:
+                    exclude_articles.append(article)
+                else:
+                    batch.append(article)
+                    
                 if article.PMCID is not None:
                     pmc_ids_list.append(article.PMCID)
 
-                if len(batch) > BATCH_SIZE:
+                if len(batch) >= BATCH_SIZE:
                     batch_file = dir_path / f"batch_{batch_index:04d}.json.tar.gz"
                     self._write_batch(batch, batch_file)
                     print(f"[INFO] Wrote batch {batch_index} ({len(batch)} articles) -> {batch_file}")
                     files_written += 1
                     batch.clear()
+                    batch_index += 1
+                if len(exclude_articles) >= BATCH_SIZE:
+                    exclude_articles_file = dir_path / f"exclude_articles_{batch_index:04d}.json.tar.gz"
+                    self._write_batch(exclude_articles, exclude_articles_file)
+                    print(f"[INFO] Wrote exclude articles batch {batch_index} ({len(exclude_articles)} articles) -> {exclude_articles_file}")
+                    files_written += 1
+                    exclude_articles.clear()
                     batch_index += 1
 
             if batch:
@@ -476,12 +520,18 @@ class Ftp_XML:
                 print(f"[INFO] Wrote final batch {batch_index} ({len(batch)} articles) -> {batch_file}")
                 files_written += 1
                 batch.clear()
+            if exclude_articles:
+                exclude_articles_file = dir_path / f"exclude_articles_{batch_index:04d}.json.tar.gz"
+                self._write_batch(exclude_articles, exclude_articles_file)
+                print(f"[INFO] Wrote final exclude articles batch {batch_index} ({len(exclude_articles)} articles) -> {exclude_articles_file}")
+                files_written += 1
+                exclude_articles.clear()
 
             # Write all PMC IDs to file in one go
-            if pmc_ids_list:
-                with open(pmc_ids_path, 'w', encoding='utf-8') as f:
-                    f.write('\n'.join(str(pid) for pid in pmc_ids_list) + '\n')
-            print(f"[INFO] Wrote PMC IDs to {pmc_ids_path}")
+            # if pmc_ids_list:
+            #     with open(pmc_ids_path, 'w', encoding='utf-8') as f:
+            #         f.write('\n'.join(str(pid) for pid in pmc_ids_list) + '\n')
+            # print(f"[INFO] Wrote PMC IDs to {pmc_ids_path}")
             print(f"\n[SUCCESS] Saved {article_count} articles to {dir_path} ({files_written} file(s))")
         except Exception as e:
             print(f"[ERROR] Failed to process tar.gz file: {str(e)}")
