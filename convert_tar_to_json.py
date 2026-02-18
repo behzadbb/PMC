@@ -22,15 +22,23 @@ def main():
     2. Process archive contents with streaming conversion.
     3. Print completion metrics.
     """
-    directory = Path("/media/breg/adata_512/pmc_2026/")
-    #directory = Path("g:/PMC/Dataset/2026/tar_gz/")
+    if os.name == "posix":
+        directory = Path("/media/breg/adata_512/pmc_2026/")
+        save_directory = Path("/home/breg/pmc_2026/json_gz/")
+        print("Using Linux directory /media/breg/adata_512/pmc_2026/")
+    elif os.name == "nt":
+        directory = Path("d:/PMC/Dataset/2026/tar_gz/")
+        save_directory = Path("d:/PMC/Dataset/2026/json_gz/")
+        print("Using Windows directory d:/PMC/Dataset/2026/tar_gz/")
+    else:
+        directory = Path("/media/breg/adata_512/pmc_2026/")
+        save_directory = Path("/home/breg/pmc_2026/json_gz/")
+        print("Unknown operating system, using default directory /media/breg/adata_512/pmc_2026/")
     tar_gz_file_paths = [str(directory / f) for f in os.listdir(directory) if f.endswith('.tar.gz')]
-    
-    
-    
-    save_directory = Path("/home/breg/pmc_2026/json_gz/")
+
     if not save_directory.exists():
         save_directory.mkdir(parents=True, exist_ok=True)
+        print(f"Created save directory {save_directory}")
 
     print("=" * 60)
     print(f"Found {len(tar_gz_file_paths)} tar.gz files to process")
