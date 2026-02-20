@@ -6,6 +6,29 @@ from pathlib import Path
 
 import pandas as pd
 
+from DTO.Article import Article
+
+
+def _column_candidates(field_name: str) -> list[str]:
+    """Return possible DataFrame column names for an Article field (name + alias)."""
+    f = Article.model_fields[field_name]
+    candidates = [field_name]
+    if getattr(f, "alias", None):
+        candidates.append(f.alias)
+    return candidates
+
+
+def _resolve_column(
+    df: pd.DataFrame, field_name: str, fallbacks: list[str] | None = None
+) -> str | None:
+    """Pick first column present in df from DTO field candidates, then optional fallbacks."""
+    dto_candidates = _column_candidates(field_name)
+    candidates = dto_candidates + (fallbacks or [])
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None if field_name == "PMCID" else (dto_candidates[0] if dto_candidates else None)
+
 
 def load_json_tar_gz(file_path: Path) -> pd.DataFrame:
     """Load a .json.tar.gz archive (single JSON array inside) into a DataFrame."""
@@ -80,10 +103,10 @@ def main():
             print(f"[SKIP] No data in {json_gz_file_path}")
             continue
 
-        # Resolve column names (case-insensitive fallback)
-        abstract_col = "Abstract" if "Abstract" in df.columns else "abstract"
-        title_col = "Title" if "Title" in df.columns else "title"
-        pmc_id_col = "PMC_Id" if "PMC_Id" in df.columns else ("pmc_id" if "pmc_id" in df.columns else None)
+        # Resolve column names from DTO.Article (field name + alias), with fallbacks for legacy JSON
+        abstract_col = _resolve_column(df, "Abstract") or "Abstract"
+        title_col = _resolve_column(df, "Title") or "Title"
+        pmc_id_col = _resolve_column(df, "PMCID", fallbacks=["PMC_Id", "pmc_id"])
 
         # For each row, get (keyword, category) matches in abstract or title
         # Aggregate by (PMC_ID, Title): one record per article with comma-separated Keywords and Categories
