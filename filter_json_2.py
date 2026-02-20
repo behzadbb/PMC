@@ -86,13 +86,13 @@ def main():
         pmc_id_col = "PMC_Id" if "PMC_Id" in df.columns else ("pmc_id" if "pmc_id" in df.columns else None)
 
         # For each row, get (keyword, category) matches in abstract or title
-        exclusion_records: list[dict] = []
+        # Aggregate by (PMC_ID, Title): one record per article with comma-separated Keywords and Categories
+        exclusion_by_article: dict[tuple, tuple[set[str], set[str]]] = {}  # (pmc_id, title) -> (keywords, categories)
         mask_excluded = pd.Series(False, index=df.index)
         for idx, row in df.iterrows():
             matches = get_matching_keywords_with_category(
                 row.get(abstract_col), keyword_to_category
             ) + get_matching_keywords_with_category(row.get(title_col), keyword_to_category)
-            # Deduplicate by (keyword, category) for this row
             seen = set()
             unique_matches = []
             for kw, cat in matches:
@@ -103,14 +103,25 @@ def main():
                 mask_excluded.loc[idx] = True
                 pmc_id = row[pmc_id_col] if pmc_id_col else idx
                 title_val = row.get(title_col, "")
+                key = (pmc_id, title_val)
+                if key not in exclusion_by_article:
+                    exclusion_by_article[key] = (set(), set())
+                kw_set, cat_set = exclusion_by_article[key]
                 for kw, cat in unique_matches:
-                    exclusion_records.append({
-                        "PMC_Id": pmc_id,
-                        "Title": title_val,
-                        "Keyword_Exclusion": kw,
-                        "Category_Exclusion": cat,
-                    })
+                    kw_set.add(kw)
+                    cat_set.add(cat)
         df_filtered = df[~mask_excluded]
+
+        # One row per unique PMC_ID: PMC_ID, Title, Keywords, Categories (comma-separated)
+        exclusion_records = [
+            {
+                "PMC_ID": pmc_id,
+                "Title": title,
+                "Keywords": ",".join(sorted(kw_set)),
+                "Categories": ",".join(sorted(cat_set)),
+            }
+            for (pmc_id, title), (kw_set, cat_set) in exclusion_by_article.items()
+        ]
 
         print(f"{json_gz_file_path.name}: {len(df)} -> {len(df_filtered)} articles")
 
@@ -124,14 +135,14 @@ def main():
             tar.addfile(info, io.BytesIO(json_bytes))
         print(f"  -> {filtered_file_path}")
 
-        # Save exclusions CSV in the same directory (PMC_Id, Title, Keyword_Exclusion, Category_Exclusion)
+        # Save exclusions CSV: one row per PMC_ID, columns PMC_ID, Title, Keywords, Categories (comma-separated)
         if exclusion_records:
             csv_name = filtered_file_path.name.replace(".json.tar.gz", "_exclusions.csv")
             csv_path = filtered_file_path.parent / csv_name
             pd.DataFrame(exclusion_records).to_csv(
                 csv_path, index=False, encoding="utf-8-sig"
             )
-            print(f"  -> {csv_path} ({len(exclusion_records)} exclusion rows)")
+            print(f"  -> {csv_path} ({len(exclusion_records)} unique PMC_IDs)")
 
     print("Done.")
 
