@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import tarfile
 from pathlib import Path
 
@@ -41,17 +42,48 @@ def load_json_tar_gz(file_path: Path) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+def _text_words(text: str) -> list[str]:
+    """Tokenize text into words (word-boundary, lowercase)."""
+    if not text or not isinstance(text, str):
+        return []
+    return re.findall(r"\b\w+\b", text.lower())
+
+
+def _keyword_matches_text(keyword: str, text_words: list[str]) -> bool:
+    """
+    True if keyword appears in text as whole word(s).
+    Single word: "rat" matches only the word "rat", not "rat" inside "carbohydrates".
+    Multi-word: "animal study" matches contiguous phrase "animal" then "study".
+    """
+    kw_clean = keyword.strip().lower()
+    if not kw_clean:
+        return False
+    kw_tokens = re.split(r"\s+", kw_clean)
+    if len(kw_tokens) == 1:
+        return kw_tokens[0] in text_words
+    # Phrase: find contiguous sequence
+    n = len(kw_tokens)
+    for i in range(len(text_words) - n + 1):
+        if text_words[i : i + n] == kw_tokens:
+            return True
+    return False
+
+
 def get_matching_keywords_with_category(
     text: str, keyword_to_category: dict[str, str]
 ) -> list[tuple[str, str]]:
     """
-    Return list of (keyword, category) for all keywords that appear in text (lowercased).
-    Each matching keyword appears once with its category.
+    Return (keyword, category) for keywords that appear in text as whole word(s).
+    Single-word keywords match only as full words; multi-word keywords match as phrases.
     """
     if pd.isna(text) or not isinstance(text, str):
         return []
-    lower = text.lower()
-    return [(kw, cat) for kw, cat in keyword_to_category.items() if kw in lower]
+    text_words = _text_words(text)
+    return [
+        (kw, cat)
+        for kw, cat in keyword_to_category.items()
+        if _keyword_matches_text(kw, text_words)
+    ]
 
 
 def main():
@@ -170,5 +202,30 @@ def main():
     print("Done.")
 
 
+def _test_word_boundary_matching() -> None:
+    """Assert whole-word and phrase matching: no substring matches."""
+    keyword_to_category = {
+        "rat": "Animal",
+        "ner": "Ner",
+        "animal study": "Animal Studies",
+    }
+    # Should NOT match (substring)
+    assert get_matching_keywords_with_category("carbohydrates", keyword_to_category) == []
+    assert get_matching_keywords_with_category("energy", keyword_to_category) == []
+    # Should match (whole word)
+    assert get_matching_keywords_with_category("rat", keyword_to_category) == [("rat", "Animal")]
+    assert get_matching_keywords_with_category("ner", keyword_to_category) == [("ner", "Ner")]
+    # Phrase
+    assert get_matching_keywords_with_category("animal study", keyword_to_category) == [
+        ("animal study", "Animal Studies")
+    ]
+    # Mixed: "rat" in sentence as word, not in "carbohydrates"
+    matches = get_matching_keywords_with_category("We used rat and carbohydrates.", keyword_to_category)
+    assert ("rat", "Animal") in matches
+    assert ("animal study", "Animal Studies") not in matches
+    print("Word-boundary matching tests passed.")
+
+
 if __name__ == "__main__":
+    _test_word_boundary_matching()
     main()
